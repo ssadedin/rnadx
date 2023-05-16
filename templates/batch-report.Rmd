@@ -1,0 +1,308 @@
+---
+title: Batch Report
+output: html_document
+params: 
+  sample_bams: NA
+---
+
+```{r, setup, include=FALSE}
+library(data.table)
+library(ggplot2)
+library(kableExtra)
+library(gridExtra)
+library(PCAtools)
+library(DESeq2)
+
+globin <- c("HBA1", "HBA2", "HBB", "HBBP1", "HBD", "HBE1", "HBG1", "HBG2", "HBM", "HBQ1", "HBZ", "HBZP1")
+```
+
+## Batch Summary
+
+```{r, load.counts, echo=FALSE}
+
+sample_bam_table = fread(params$sample_bams, col.names = c('sample','bam'), header=F)
+
+bam_to_sample = sample_bam_table$sample
+names(bam_to_sample) = sample_bam_table$bam
+
+load.batch.counts <- function(counts.name) {
+    batch.cts <- fread(counts.name)
+    total.cols = length(names(batch.cts))
+    meta.cols = total.cols - nrow(sample_bam_table)
+    names(batch.cts)[-1:-meta.cols] <- sapply(names(batch.cts[,-1:-meta.cols]), function(bam)   bam_to_sample[[bam]] )
+    return(batch.cts)
+}
+
+batch.cts <- load.batch.counts('counts/feature.counts.txt')
+batch.cts.summary <- load.batch.counts('counts/feature.counts.txt.summary')
+
+# get them directly from the table to be robust to any possible re-ordering
+sample.names <- names(batch.cts)[-1:-6]
+```
+
+```{r, deseq2.pca, include=FALSE, echo=FALSE, out.width="100%"}
+
+batch.design <- data.frame(sample = sample.names, condition = sample.names)
+batch.design$condition <- factor(batch.design$condition)
+
+rownames(batch.cts) <- batch.cts$Geneid
+dds <- DESeqDataSetFromMatrix(countData = batch.cts[, ..sample.names], colData = batch.design, design = ~ 1)
+dds <- DESeq(dds, minReplicatesForReplace=Inf, quiet=TRUE)
+```
+
+### FeatureCounts Summary Plot
+
+The following plot is based on the summary statistics from the program
+(featureCounts)[https://doi.org/10.1093/bioinformatics/btt656].
+In brief, it works by taking the output of read mapping (performed with the STAR aligner),
+and an annotation (Gencode v37), and assigning mapped read pairs to genes,
+based on their overlap with the annotation.
+
+```{r, fc.summary.plot, echo=FALSE, out.width="100%"}
+b.c.s.rs <- rowSums(batch.cts.summary[, ..sample.names])
+g <- ggplot(melt(batch.cts.summary[b.c.s.rs > 0], id.vars=c('Status')), aes(variable, value, fill=Status)) + geom_bar(stat='identity')
+g <- g + theme_minimal() + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+g <- g + labs(x="Sample", y="absolute read pair count", fill="Class")
+print(g)
+```
+
+The classes reported have the following meaning given in the documentation. Not all classes may be present.
+
+**Unassigned Ambiguity**: alignments that overlap two or more features (feature-level summarization) or meta-features (meta-feature-level summarization).
+
+**Unassigned Chimera**: two ends in a paired end alignment are located on different chromosomes or have unexpected orientation.
+
+**Unassigned Duplicate**: alignments marked as duplicate (indicated in the FLAG field).
+
+**Unassigned FragementLength**: fragment length inferred from paired end alignment does not meet the length criteria.
+
+**Unassigned MappingQuality**: alignments with a mapping quality score lower than the threshold.
+
+**Unassigned MultiMapping**: alignments reported for multi-mapping reads (indicated by ‘NH’ tag).
+
+**Unassigned NoFeatures**: alignments that do not overlap any feature.
+
+**Unassigned Overlapping Length**: alignments that do not overlap any feature (or metafeature) with the minimum required overlap length.
+
+**Unassigned Secondary**: alignments reported as secondary alignments (indicated in the FLAG field).
+
+**Unassigned Split (or Unassigned NonSplit)**: alignments that contain junctions (or do not contain junctions).
+
+**Unassigned Unmapped**: unmapped reads cannot be assigned.
+
+## Relative Log Expression
+
+The following boxplot shows the distribution log expression relative to the
+median for each gene across the samples in the batch.
+
+This type of plot is quite robust to biological variation, and is good for
+indicating whether there are substantial batch effects present in the data.
+In the case of the acute care data, this is only partially true, because
+the samples encompass very large biological variation e.g. very diverse
+developmental stages such as neonatal versus adult.
+
+```{r, rle.profile, echo=F, out.width="100%"}
+batch.rlog <- assay(rlog(dds))
+batch.rlog.medians <- rowMedians(batch.rlog)
+batch.rle <- data.table(batch.rlog - batch.rlog.medians)
+batch.rle.long <- melt(batch.rle, measure.vars=sample.names, id.vars=c(), value.name="rle", variable.name="sample")
+batch.iqr <-- batch.rle.long[, .(iqr = quantile(rle, 0.75) - quantile(rle, 0.25)), by=.(sample)][, max(iqr)]
+g <- ggplot(batch.rle.long, aes(rle, sample, fill=sample)) + geom_boxplot()
+g <- g + theme_minimal() + theme(legend.position="none")
+g <- g + labs(y="Sample", x="Relative Log Expression (RLE)")
+print(g)
+g <- g + coord_cartesian(xlim=c(-0.5, 0.5))
+print(g)
+```
+
+## Principle Component Analysis
+
+Principle Component Analysis (PCA) is a useful tool for identifying major
+sources of variation in the data. It uses well understood mathematical
+techniques to express the data points (samples) in terms of a series of
+axies each conceptually at "right-angles" to all the others.
+
+In the first few axies, we tend to see data points (i.e. samples)
+segregate roughly along known major differences, such as neonatal vs
+adult, or by family.  We may also see samples segregate by systematic
+factors such as sequence run (for multi-run analysis), or by sample
+preparation batch, etc.
+
+If samples segregate in ways that do not roughly line up with identified
+factors such as those described above, this can be indicative of problems
+with the data.
+
+### Principle Components 1 & 2.
+
+
+```{r, deseq2.pca.pc1.pc2, echo=FALSE, out.width="100%"}
+vst <- assay(vst(dds))
+p <- pca(vst)
+pc1.range <- range(p$rotated$PC1)
+pc1.width <- pc1.range[2] - pc1.range[1]
+pc1.mag <- 0.1
+g <- ggplot(p$rotated, aes(PC1, PC2, colour=rownames(p$rotated)))
+g <- g + geom_point()
+g <- g + geom_label(aes(PC1, PC2, label=rownames(p$rotated)), hjust = 0, nudge_x = 1, size=2)
+g <- g + scale_x_continuous(limits=c(pc1.range[1] - pc1.mag*pc1.width, pc1.range[2] + pc1.mag*pc1.width))
+g <- g + theme_minimal() + theme(legend.position='none')
+print(g)
+```
+
+### Principle Components 3 & 4.
+
+## One-vs-rest Differential Expression MA-plots
+
+Differential Expression (DE) analysis attempts to determine, across a
+collection of samples, which genes have a different level of expression
+in a given sample, relative to the others.  There is quite a lot of
+mathematical machinery used to try and account for batch effects, and
+other confounding factors, as well as using careful statistical reasoning
+to make sure that results reported as statistically significant are not
+just artefacts in the data.
+
+Most DE analysis reports results in terms of log2 fold change. A log2
+fold change of +1 means that after taking into account library size
+and batch effects, we saw twice as many reads in that gene in the
+sample of interest, compared to the other samples.  A log2 fold change
+of +2, means we saw 4 times as many; +3, 8 times as many, and so on.
+Conversely, a log2 fold change of -1 means we saw half as many reads;
+-2, one quarter as many, and so on. A useful rule of thumb is that a
+log2 change of about 3.3 in either direction corresponds to a factor
+of 10; likewise, a log2 fold change of about 6.6 to a factor of 100,
+and a log2 fold change of 10 to about a factor of 1000.
+
+In the plots below, there is one panel for each sample. The horizontal
+scale represents the mean level of expression for a gene across the
+samples, and the vertical, the log2 fold change in the sample of
+interest, with each point representing a single gene. The grey points
+represent genes that did not have a statistically significant change
+in expression, and the red points represent genes that did have a
+statistically significant change in expression.
+
+Where a batch is a mix of proband and parent samples, these results may
+only be generally indicitave, since they arise from biologically diverse
+samples and may mostly reflect the differences in developmental stage,
+rather than being markers of pathology.
+
+```{r, deseq2.one.vs.rest, echo=FALSE, warning=FALSE, fig.height=8, out.width="100%"}
+one.vs.rest <- function(proband, sample.names, batch.cts) {
+    n <- length(sample.names)
+    batch.design <- data.table(sample = sample.names, condition = rep("control", n))
+    batch.design[sample == proband, condition := "proband"]
+    batch.design[, condition := factor(condition)]
+
+    rownames(batch.cts) <- batch.cts$Geneid
+    dds <- DESeqDataSetFromMatrix(countData = batch.cts[, ..sample.names], colData = batch.design, design = ~ condition)
+    dds <- DESeq(dds, minReplicatesForReplace=Inf, quiet=TRUE)
+    return (dds)
+}
+
+o.v.r.data <- data.table()
+for (sn in sample.names) {
+    sample.dds <- one.vs.rest(sn, sample.names, batch.cts)
+    sample.res <- as.data.table(results(sample.dds))
+    sample.res[which(padj < 0.1), significant := "Significant"]
+    sample.res[, sample := sn]
+    o.v.r.data <- rbind(o.v.r.data, sample.res)
+}
+g <- ggplot()
+g <- g + geom_point(data=o.v.r.data[is.na(significant)], aes(baseMean, log2FoldChange), colour="grey50", size=0.5)
+g <- g + geom_point(data=o.v.r.data[!is.na(significant)], aes(baseMean, log2FoldChange), colour="red", size=0.5)
+g <- g + scale_x_log10()
+g <- g + labs(x="mean of normalised counts", y="log fold change")
+g <- g + theme_minimal() + theme(legend.position='none')
+g <- g + facet_wrap(~sample)
+print(g)
+```
+
+## Count Quantiles
+
+```{r, annot.counts, echo=FALSE, out.width="100%"}
+batch.cts.long <- melt(batch.cts, id.vars="Geneid", measure.vars=sample.names, variable.name = "sample", value.name = "count");
+
+batch.cts.long[, cpm := 1e6*count/sum(count), by=.(sample)]
+
+genc <- rtracklayer::import("/rnadx/reference/hg38/annotation/gencode.v37.annotation.gtf");
+genc <- as.data.table(genc);
+gene.types <- unique(genc[type=="gene", .(gene_name, gene_type)]);
+
+batch.cts.long <- merge(batch.cts.long, gene.types, by.x=c("Geneid"), by.y=c("gene_name"));
+```
+
+The following table gives count statistics across the samples in the batch
+which are representative of the useful yield of the sequencing run. It
+is composed by considering the genes in the Mendeliome panel, as a set
+of genes representative of diagnostically relevant genes. The table give
+the number of read pairs (expressed as millions) assigned, and the 1^st^, 2^nd^,
+and 3^rd^ quartiles of the assigned coverage for the genes in the set.
+
+While there may be variations in the depletion of ribosomal and globin
+RNA (see below), which can account for a non-trivial fraction of the
+total reads sequenced, the diagnostic usefulness of the data is more
+dependent on these absolute numbers being adequate.
+
+
+```{r, cpm.summary, echo=FALSE}
+mend <- fread("/rnadx/reference/panels/Mendeliome.tsv");
+batch.count.quartiles.long <- batch.cts.long[Geneid %in% mend$`Gene Symbol`, .(quant = c("1/4", "1/2", "3/4"), value = quantile(count, c(0.25, 0.5, 0.75))), by=.(sample)]
+batch.count.quartiles <- dcast(batch.count.quartiles.long, sample ~ quant, value.var = "value")[order(sample)]
+batch.count.quartiles$`reads (M)` <- 1e-6 * batch.cts.long[, .(total = sum(count)), by=.(sample)][order(sample)]$total
+
+b.c.q.cols <- c("sample", "reads (M)", "1/4", "1/2", "3/4")
+knitr::kable(batch.count.quartiles[, ..b.c.q.cols]) %>%
+    kable_styling()
+```
+
+## Cpm by Gene Type
+
+We can also assess the quality of the sequencing data by looking at the
+number of reads that arise from different kinds of gene.  For these
+plots, we use counts per million (CPM), which scales the counts to a
+nominal library size of 1 million reads. In this normalised setting,
+a CPM value of 10,000 corresponds to 1% of the mapped reads.
+
+The following plots show the CPM (counts per million) for each sample
+in the batch, according to the gene type.
+
+The sequencing protocol in the acute care is a total RNA, rather than
+an mRNA protocol.  As part of the sample preparation, a depletion is
+performed to remove most of the ribosomal RNA and globin RNA, which
+would otherwise consume the vast majority of the sequencing capacity.
+
+We expect most of the RNA sequenced to arise from protien coding genes. If
+the depletion has been less efficient, or the library preparation has
+experienced problems, we may see other classes of gene overrepresented
+in the following plots.
+
+```{r, cpm.by.type, echo=FALSE, out.width="100%"}
+cpm.by.type <- batch.cts.long[, .(total.cpm = sum(cpm)), by=.(sample, gene_type)]
+
+g <- ggplot(cpm.by.type[total.cpm > 100])
+g <- g + geom_bar(aes(gene_type, total.cpm, fill=gene_type), stat="identity")
+g <- g + theme_minimal() + theme(axis.text.x = element_text(angle=45, hjust=1, size=4), legend.position = "none")
+g <- g + labs(x="Gene Type", y="Counts per million")
+g <- g + facet_wrap(~sample)
+print(g)
+
+```
+
+## Globin Genes
+
+As noted above, the total RNA library preparation should remove the vast
+majority of ribosomal and globin RNA.  We can validate this by showing
+the CPM values for the main globin genes. Generally, we expect these to
+total less than 10,000 CPM (or 1% of the total assigned reads). Values
+above this suggest that the depletion was less efficient than expected.
+
+The following plot shows the CPM for globin genes [list from](https://doi.org/10.1038/s41598-020-62801-6).
+
+```{r, globin.genes, echo=FALSE, out.width="100%"}
+batch.globins <- batch.cts.long[Geneid %in% globin, .(sample, Geneid, cpm)][order(sample, Geneid)]
+g <- ggplot(batch.globins);
+g <- g + geom_bar(aes(Geneid, cpm, fill=Geneid), stat="identity");
+g <- g + theme_minimal() + theme(axis.text.x = element_text(angle=45, hjust=1), legend.position = "none");
+g <- g + labs(x="Globin Gene", y="Counts per million")
+g <- g + facet_wrap(~sample);
+print(g)
+```

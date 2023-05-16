@@ -1,0 +1,60 @@
+#!/usr/bin/env bpipe
+
+import groovy.json.*
+
+title  'RNA-DX Batch Creator'
+
+println "*"*100
+println 'RNA-DX Batch Creator'.center(100)
+println "*"*100
+
+options {
+    name 'Name of batch to create', required: true, args: 1
+    mask 'Regular expression mask to select used part of sample id', required: false, args:1
+}
+
+println "Creating batch: $opts.name"
+
+
+// parse the leading part of each file name up to any lane or read info
+sample_fastqs = args.groupBy {
+    (file(it).name =~ /(.*)(L[0-9]*){0,1}[_.]R?[12].fastq.gz/)[0][1]
+}
+
+if(opts.mask) {
+    sample_fastqs = sample_fastqs.collectEntries {
+        [ (it.key =~ opts.mask)[0][1], it.value ]
+    }
+}
+
+meta = 
+ [ 
+   samples : 
+    sample_fastqs.collect { sample, fastqs ->
+       [
+           identifier: sample,
+           fastqs: fastqs
+       ]
+    }
+]
+
+
+println "Samples are: \n\n" + sample_fastqs*.key*.padRight(30).join('\n')
+
+sample_file = file("batches/$opts.name/samples.yaml")
+sample_file.parentFile.mkdirs()
+
+options = new org.yaml.snakeyaml.DumperOptions();
+options.setSplitLines(false);
+
+sample_file.text = new org.yaml.snakeyaml.Yaml(options).dump(meta)
+
+/*
+sample_file = file("batches/$opts.name/samples.json")
+sample_file.parentFile.mkdirs()
+
+sample_file << JsonOutput.prettyPrint(JsonOutput.toJson(meta))
+*/
+
+println "Done : created $sample_file.absolutePath"
+

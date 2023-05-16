@@ -1,0 +1,22 @@
+<html>
+<head>
+<title>RNADX Results ${new Date()}</title>
+</head>
+<body  style='font-family: arial;'>
+    <h2>Case index for batch ${batch}</h2>
+
+   <table style='border: solid 1px #555; border-collapse: collapse;' border=1 cellpadding=3>
+   <tbody>
+   <tr>
+     <th>Sample</th><th>RNADX</th><th>Gitlab</th>
+   </tr>
+   <%samples.each { sample -> %>
+   <tr>
+       <td>$sample</td>
+       <td><a href='$sample/index.html'>RNADX Results</a></td>
+       <td><a href='http://git.mcri.edu.au/VCGS/clingen_sample_tracking/issues?scope=all&utf8=%E2%9C%93&state=all&search=$sample'>Clingen Sample Tracking</a></td>
+   </tr>
+   <%}%>
+   </table>
+</body>
+</html>

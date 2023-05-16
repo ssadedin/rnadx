@@ -1,0 +1,158 @@
+---
+title: RNASeq Differential Expression
+output: html_document
+params:
+    proband: "<no-such-sample>"
+    controls: null
+    ctrlcounts: null
+---
+
+```{r, setup, include=FALSE}
+# Invocation:
+# markdown::render("/source/templates/sample-deseq2.Rmd", "html_document",
+#                  "output_dir"="/batch/reports/", output_file="wombat.html",
+#                  knit_root_dir=getwd(),
+#                  params=list(proband="20W001810", controls=NULL)
+library(DESeq2)
+library(PCAtools)
+library(data.table)
+library(ggplot2)
+library(kableExtra)
+
+proband <- params$proband
+
+load.batch.counts <- function(counts.name) {
+    batch.cts <- fread(counts.name)
+
+    # Simplify sample names:
+    #   sorted/210322_A01221_0029_ML211754_20W002175RNA_MAN-20210312_TSStrtRNA_L000.Aligned.out.srt.bam
+    # ->
+    #   20W002175
+    #
+    cols <- colnames(batch.cts)
+    cols <- gsub('.*_([0-9]+W[0-9]+)RNA_.*', '\\1', cols)
+    colnames(batch.cts) <- cols
+
+    return(batch.cts)
+}
+```
+
+## Samples and Controls
+
+The proband sample is `r params$proband`.
+
+```{r, load.sample.sheets, echo=FALSE}
+sample.sheet <- fread("reports/sample-sheet.tsv")
+sample.sheet[, status := "batch"]
+sample.sheet[sample == params$proband, status := "proband"]
+
+knitr::kable(sample.sheet, align='l') %>%
+    kable_styling()
+
+stopifnot(sum(sample.sheet$sample == params$proband) == 1)
+
+for (ctrl.name in params$controls) {
+    extra.samples <- fread(ctrl.name)
+    extran.samples[, status := "control"]
+    sample.sheet <- rbind(sample.sheet, extra.samples)
+}
+
+dupSam <- duplicated(sample.sheet$sample)
+dupBam <- duplicated(sample.sheet$bam)
+dups <- (dupSam | dupBam)
+if (any(dups)) {
+    ss <- sample.sheet[dups,]
+    warning("The sample sheet(s) contain duplicate sample/BAM names.")
+    warning(paste(ss$samplename, ss$filename, sep="\t", collapse="\n"))
+}
+
+bams.extant <- file.exists(sample.sheet$bam)
+if (any(!bams.extant)) {
+    warning("The sample sheet(s) refer to nonexistent/unreadable BAMs")
+    missing.bams <- sample.sheet$bam[which(!bams.extant)]
+    warning(paste(missing.bams, sep="\t", collapse="\n"))
+}
+
+sample.sheet[, status := factor(status)]
+
+sample.names <- sample.sheet$sample
+```
+
+```{r, load.counts, echo=FALSE}
+batch.cts <- load.batch.counts('counts/feature.counts.txt')
+for (cts.name in params$ctrlcounts) {
+    extra.cts <- load.batch.counts(cts.name)
+    extra.cts.cols <- colnames(extra.cts)
+    extra.cols <- extra.cts.cols[which(extra.cts.cols %in% sample.sheet$sample)]
+    batch.cts <- cbind(batch.cts, extra.cts[, ..extra.cols])
+}
+stopifnot(all(sample.sheet$sample %in% colnames(batch.cts)))
+```
+
+```{r, run.basic.de, echo=FALSE}
+rownames(batch.cts) <- batch.cts$Geneid
+dds <- DESeqDataSetFromMatrix(countData = batch.cts[, ..sample.names], colData = sample.sheet, design = ~ status)
+dds <- DESeq(dds, minReplicatesForReplace=Inf, quiet=TRUE)
+sample.res <- as.data.table(results(dds))
+sample.res[, Geneid := batch.cts$Geneid]
+sample.res[which(padj < 0.1), significant := "Significant"]
+```
+
+## Principle Component Analysis
+
+Samples displayed with principle components 1 & 2.
+
+```{r, deseq2.pca.pc1.pc2, echo=FALSE, out.width="100%"}
+vst <- assay(vst(dds))
+p <- pca(vst)
+pc1.range <- range(p$rotated$PC1)
+pc1.width <- pc1.range[2] - pc1.range[1]
+pc1.mag <- 0.1
+g <- ggplot(p$rotated, aes(PC1, PC2, colour=rownames(p$rotated)))
+g <- g + geom_point()
+g <- g + geom_label(aes(PC1, PC2, label=rownames(p$rotated)), hjust = 0, nudge_x = 1, size=2)
+g <- g + scale_x_continuous(limits=c(pc1.range[1] - pc1.mag*pc1.width, pc1.range[2] + pc1.mag*pc1.width))
+g <- g + theme_minimal() + theme(legend.position='none')
+print(g)
+```
+
+Samples displayed with principle components 3 & 4.
+
+```{r, deseq2.pca.pc3.pc4, echo=FALSE, out.width="100%"}
+pc3.range <- range(p$rotated$PC3)
+pc3.width <- pc3.range[2] - pc3.range[1]
+pc3.mag <- 0.1
+g <- ggplot(p$rotated, aes(PC3, PC4, colour=rownames(p$rotated)))
+g <- g + geom_point()
+g <- g + geom_label(aes(PC3, PC4, label=rownames(p$rotated)), hjust = 0, nudge_x = 1, size=2)
+g <- g + scale_x_continuous(limits=c(pc3.range[1] - pc3.mag*pc3.width, pc3.range[2] + pc3.mag*pc3.width))
+g <- g + theme_minimal() + theme(legend.position='none')
+print(g)
+```
+
+## Sample Differential Expression
+
+```{r, deseq2.de, echo=FALSE, out.width="100%"}
+g <- ggplot()
+g <- g + geom_point(data=sample.res[is.na(significant)], aes(baseMean, log2FoldChange), colour="grey50")
+g <- g + geom_point(data=sample.res[!is.na(significant)], aes(baseMean, log2FoldChange), colour="red")
+g <- g + scale_x_log10()
+g <- g + labs(x="mean of normalised counts", y="log fold change")
+g <- g + theme_minimal() + theme(legend.position='none')
+print(g)
+```
+
+
+```{r, deseq2.de.table, echo=FALSE, out.width="100%"}
+sample.res.tbl <- data.table(sample.res)
+sample.raw.counts <- as.data.table(counts(dds, normalized=FALSE))[, get(proband)]
+sample.norm.counts <- as.data.table(counts(dds, normalized=TRUE))[, get(proband)]
+sample.res.tbl[, raw.count := sample.raw.counts]
+sample.res.tbl[, norm.count := sample.norm.counts]
+sample.res.tbl <- sample.res.tbl[, .(gene = Geneid, raw.count, norm.count, "mean.count" = baseMean, log2FoldChange, "test.statistic" = stat, "raw.pvalue" = pvalue, "adjusted.pvalue" = padj)]
+write.table(sample.res.tbl[order(adjusted.pvalue, -abs(log2FoldChange))], sprintf("reports/%s-deseq2.tsv", proband), row.names=FALSE, sep="\t", quote=FALSE)
+sample.res.tbl <- sample.res.tbl[order(adjusted.pvalue, -abs(log2FoldChange))[1:200]]
+knitr::kable(sample.res.tbl,  align='r') %>%
+    kable_styling() %>%
+    scroll_box(width="100%", height="4in")
+```

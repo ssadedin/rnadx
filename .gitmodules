@@ -1,0 +1,3 @@
+[submodule "tools/bpipe"]
+	path = tools/bpipe
+	url = git@github.com:ssadedin/bpipe.git
