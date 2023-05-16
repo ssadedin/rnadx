@@ -1,3 +1,6 @@
 [submodule "tools/bpipe"]
 	path = tools/bpipe
 	url = git@github.com:ssadedin/bpipe.git
+[submodule "tools/rnadxview"]
+	path = tools/rnadxview
+	url = git@github.com:ssadedin/rnadxview.git
